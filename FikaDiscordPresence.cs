@@ -1,3 +1,5 @@
+Explain every single line of the following .cs file to me like I know nothing about programming but at the end of your message I will know everything :
+
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Helpers;
@@ -15,11 +17,11 @@ namespace _FikaDiscordPresence;
 
 public record ModMetadata : AbstractModMetadata
 {
-    public override string ModGuid { get; init; } = "com.fiodor.fikadiscordpresence";
+    public override string ModGuid { get; init; } = "com.fikadiscordpresence.fiodor";
     public override string Name { get; init; } = "Fika Discord Presence";
     public override string Author { get; init; } = "Fiodor";
     public override List<string>? Contributors { get; init; }
-    public override SemanticVersioning.Version Version { get; init; } = new("1.0.1");
+    public override SemanticVersioning.Version Version { get; init; } = new("1.0.0");
     public override SemanticVersioning.Range SptVersion { get; init; } = new("~4.0.0");
 
     public override List<string>? Incompatibilities { get; init; }
@@ -119,7 +121,6 @@ public class ReadJsonConfig(
 
     private async Task RunLoop(ISptLogger<ReadJsonConfig> logger, string pathToMod, ModConfig initialConfig)
     {
-        var lastConfigWriteUtc = DateTime.MinValue;
         var config = initialConfig;
         var configPath = Path.Combine(pathToMod, "config.json");
 
@@ -162,20 +163,19 @@ public class ReadJsonConfig(
         {
             try
             {
-                var wt = File.GetLastWriteTimeUtc(configPath);
-                if (wt != lastConfigWriteUtc)
+                // 🔁 Live reload config.json each cycle
+                try
                 {
-                    lastConfigWriteUtc = wt;
-            
                     var json = File.ReadAllText(configPath, Encoding.UTF8);
                     var reloaded = JsonSerializer.Deserialize<ModConfig>(json, _jsonOpts);
                     if (reloaded != null)
                     {
                         config = reloaded;
-            
+
+                        // refresh config-dependent variables
                         baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
                         fikaHeaders = new AuthenticationHeaderValue("Bearer", config.Fika.ApiKey ?? "");
-            
+
                         var newStatePath = Path.Combine(pathToMod, config.Discord.StateFile);
                         if (!string.Equals(newStatePath, statePath, StringComparison.OrdinalIgnoreCase))
                         {
@@ -184,12 +184,10 @@ public class ReadJsonConfig(
                         }
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
-            }
-
+                catch (Exception ex)
+                {
+                    logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
+                }
 
                 if (!config.Enabled)
                 {
@@ -978,5 +976,3 @@ public class LogMonitorLite
             WeeklyBossMap = null;
     }
 }
-
-
