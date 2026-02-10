@@ -9,11 +9,12 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 
 * Live player list from the Fika API
 * Raid / out-of-raid activity detection
-* Side display (*PMC / Scav*)
+* Side display (*PMC / Scav*) during raids.
 * Activity duration tracking
-* Weekly Boss detection from SPT logs
+* Weekly Boss detection from SPT logs (if ABPS is installed)
 * Auto-creates and edits a single persistent Discord message
 * Live config reload *(no restart required for most settings)*
+* Extremely customizable
 
 ---
 
@@ -35,3 +36,5 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
    * Fika.ApiKey
    * LogFolderPath
 4. Start the SPT server.
+
+Thumbnail by agus raharjo, inverted by me.
