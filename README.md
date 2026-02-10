@@ -5,6 +5,13 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 
 ---
 
+## **Example**
+
+![Description](https://i.ibb.co/1f1B9GQW/image.png)
+
+
+---
+
 ## **Features**
 
 * Live player list from the Fika API
@@ -14,16 +21,14 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 * Weekly Boss detection from SPT logs (if ABPS is installed)
 * Auto-creates and edits a single persistent Discord message
 * Live config reload *(no restart required for most settings)*
-* Extremely customizable
+* Extremely customizable (Icons, colors, weekly boss display, names of categories, refresh rate...)
 
 ---
 
 ## **Requirements**
 
-* SPT 4.x
 * Fika
 * Discord webhook URL
-* ABPS if you want the Weekly boss tracking to work.
 
 ---
 
@@ -32,9 +37,10 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 1. Place the mod folder inside your Tarkov install folder.
 2. Open config.json.
 3. Insert:
-   * Discord.WebhookUrl
-   * Fika.ApiKey
-   * LogFolderPath
+   * Discord.WebhookUrl (https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks)
+   * Fika.ApiKey (Found in SPTInstallFolder\SPT\user\mods\fika-server\assets\configs\fika.jsonc)
+   * LogFolderPath (X:\\Your\\Tarkov\\Folder\\SPT\\user\\logs\\spt)
 4. Start the SPT server.
+
 
 Thumbnail by agus raharjo, inverted by me.
