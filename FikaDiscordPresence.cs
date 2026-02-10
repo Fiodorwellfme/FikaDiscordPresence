@@ -30,7 +30,6 @@ public record ModMetadata : AbstractModMetadata
 }
 
 [Injectable(TypePriority = int.MaxValue)]
-
 public class ReadJsonConfig(
     ISptLogger<ReadJsonConfig> logger,
     ModHelper modHelper) : IOnLoad
@@ -41,6 +40,7 @@ public class ReadJsonConfig(
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true
     };
+
     private bool ValidateConfig(ModConfig config, ISptLogger<ReadJsonConfig> logger)
     {
         var errors = new List<string>();
@@ -85,7 +85,6 @@ public class ReadJsonConfig(
         return true;
     }
 
-
     public Task OnLoad()
     {
         var pathToMod = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
@@ -97,7 +96,6 @@ public class ReadJsonConfig(
             return Task.CompletedTask;
         }
 
-        // ✅ Add validation here
         if (!ValidateConfig(config, logger))
         {
             logger.Error("Mod will NOT start due to invalid configuration.");
@@ -154,7 +152,9 @@ public class ReadJsonConfig(
         AuthenticationHeaderValue fikaHeaders = new("Bearer", config.Fika.ApiKey ?? "");
 
         var logMon = config.LogMonitor.Enabled
-            ? new LogMonitorLite(config.LogMonitor.LogFolderPath ?? "", TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours))
+            ? new LogMonitorLite(
+                config.LogMonitor.LogFolderPath ?? "",
+                TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours))
             : null;
 
         while (true)
@@ -186,7 +186,6 @@ public class ReadJsonConfig(
                 {
                     logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
                 }
-
 
                 if (!config.Enabled)
                 {
@@ -240,7 +239,6 @@ public class ReadJsonConfig(
                     {
                         statusMessageId = 0;
                     }
-
                 }
             }
             catch (Exception e)
@@ -251,7 +249,6 @@ public class ReadJsonConfig(
             await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, config.Update.IntervalSeconds)));
         }
     }
-
 
     private EmbedPayload RenderEmbed(
         ModConfig config,
@@ -313,10 +310,9 @@ public class ReadJsonConfig(
                 });
             }
 
-            // 🔥 Move NoOnline into a field instead of description
             embed.Fields.Add(new EmbedFieldPayload
             {
-                Name = "\u200b", // invisible spacer title
+                Name = "\u200b",
                 Value = config.Text.NoOnlineDescription,
                 Inline = false
             });
@@ -328,8 +324,6 @@ public class ReadJsonConfig(
 
             return embed;
         }
-
-
 
         if (!string.IsNullOrWhiteSpace(weeklyBoss))
         {
@@ -824,12 +818,26 @@ public class BotState
 public class LogMonitorLite
 {
     private readonly string _logFolderPath;
-    private readonly TimeSpan _tzOffset;
+    private readonly TimeSpan _tzOffset; // currently unused but kept for future
     private string? _logFilePath;
     private long _pos;
 
     public string? WeeklyBoss { get; private set; }
     public string? WeeklyBossMap { get; private set; }
+
+    // IMPORTANT: values must match your config.MapNamesLog keys (lowercase, underscores)
+    private static readonly Dictionary<string, string> BossToMapKey =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["bossBully"]    = "bigmap",
+            ["bossGluhar"]   = "rezervbase",
+            ["bossKilla"]    = "interchange",
+            ["bossKojaniy"]  = "woods",
+            ["bossSanitar"]  = "shoreline",
+            ["bossKolontay"] = "tarkovstreets",
+            ["bossKnight"]   = "lighthouse",
+            ["bossTagilla"]  = "factory4_day",
+        };
 
     public LogMonitorLite(string logFolderPath, TimeSpan tzOffset)
     {
@@ -867,7 +875,6 @@ public class LogMonitorLite
             _logFilePath = null;
         }
     }
-
 
     private string? FindLatestLog()
     {
@@ -924,14 +931,46 @@ public class LogMonitorLite
 
     private void ProcessLine(string line, bool initialLoad)
     {
+        // 1) ABPS/acidbotplacementsystem line (best signal: includes map)
         if (line.Contains("Weekly Boss:") && line.Contains("_botplacementsystem"))
         {
-            var m = Regex.Match(line, @"Weekly Boss:\s+(boss\w+)\s+\|\s+\d+%\s+Chance\s+on\s+(\w+)");
+            var m = Regex.Match(
+                line,
+                @"Weekly Boss:\s+(boss\w+)\s+\|\s+\d+%\s+Chance\s+on\s+(\w+)",
+                RegexOptions.CultureInvariant);
+
             if (m.Success)
             {
                 WeeklyBoss = m.Groups[1].Value;
                 WeeklyBossMap = m.Groups[2].Value;
             }
+
+            return;
         }
+
+        // 2) Fallback: core SPT line (no map)
+        // Example: "[...][Debug][SPTarkov.Server.Core.Services.PostDbLoadService] bossTagilla is boss of the week"
+        if (line.IndexOf(" is boss of the week", StringComparison.OrdinalIgnoreCase) < 0)
+            return;
+
+        var m2 = Regex.Match(
+            line,
+            @"\b(boss\w+)\b\s+is\s+boss\s+of\s+the\s+week\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        if (!m2.Success)
+            return;
+
+        // Don't overwrite ABPS-derived boss+map
+        if (!string.IsNullOrWhiteSpace(WeeklyBoss) && !string.IsNullOrWhiteSpace(WeeklyBossMap))
+            return;
+
+        WeeklyBoss = m2.Groups[1].Value;
+
+        // Derive map key to match config.MapNamesLog keys
+        if (BossToMapKey.TryGetValue(WeeklyBoss, out var mapKey))
+            WeeklyBossMap = mapKey;
+        else
+            WeeklyBossMap = null;
     }
 }
