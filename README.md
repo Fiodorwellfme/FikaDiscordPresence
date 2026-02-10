@@ -28,11 +28,10 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 
 ## **Installation**
 
-1. Place the mod folder inside your **SPT `user/mods`** directory.
-2. Edit `config.json`.
+1. Place the mod folder inside your Tarkov install folder.
+2. Open config.json.
 3. Insert:
-
-   * `Discord.WebhookUrl`
-   * `Fika.ApiKey`
-   * `LogFolderPath`
+   * Discord.WebhookUrl
+   * Fika.ApiKey
+   * LogFolderPath
 4. Start the SPT server.
