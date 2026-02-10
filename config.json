@@ -9,7 +9,7 @@
     // Paste your Discord webhook URL here.
     "WebhookUrl": "",
 
-    // Optional: overrides the webhook's default "name" shown on messages.
+    // Optional: overrides the webhook's default "name" shown on messages. Need to delete the previous message for the name to actually change.
     "Username": "Fika Status",
 
     // Optional: webhook avatar image URL. Leave "" to use the webhook's default.
@@ -179,3 +179,4 @@
     "labyrinth": "The Labyrinth"
   }
 }
+
