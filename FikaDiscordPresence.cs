@@ -119,6 +119,7 @@ public class ReadJsonConfig(
 
     private async Task RunLoop(ISptLogger<ReadJsonConfig> logger, string pathToMod, ModConfig initialConfig)
     {
+        var lastConfigWriteUtc = DateTime.MinValue;
         var config = initialConfig;
         var configPath = Path.Combine(pathToMod, "config.json");
 
@@ -161,19 +162,20 @@ public class ReadJsonConfig(
         {
             try
             {
-                // 🔁 Live reload config.json each cycle
-                try
+                var wt = File.GetLastWriteTimeUtc(configPath);
+                if (wt != lastConfigWriteUtc)
                 {
+                    lastConfigWriteUtc = wt;
+            
                     var json = File.ReadAllText(configPath, Encoding.UTF8);
                     var reloaded = JsonSerializer.Deserialize<ModConfig>(json, _jsonOpts);
                     if (reloaded != null)
                     {
                         config = reloaded;
-
-                        // refresh config-dependent variables
+            
                         baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
                         fikaHeaders = new AuthenticationHeaderValue("Bearer", config.Fika.ApiKey ?? "");
-
+            
                         var newStatePath = Path.Combine(pathToMod, config.Discord.StateFile);
                         if (!string.Equals(newStatePath, statePath, StringComparison.OrdinalIgnoreCase))
                         {
@@ -182,10 +184,12 @@ public class ReadJsonConfig(
                         }
                     }
                 }
-                catch (Exception ex)
-                {
-                    logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
-                }
+            }
+            catch (Exception ex)
+            {
+                logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
+            }
+
 
                 if (!config.Enabled)
                 {
@@ -974,4 +978,5 @@ public class LogMonitorLite
             WeeklyBossMap = null;
     }
 }
+
 
