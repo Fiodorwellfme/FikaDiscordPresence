@@ -7,7 +7,7 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 
 ## **Features**
 
-* Live player list from the **Fika API**
+* Live player list from the Fika API
 * Raid / out-of-raid activity detection
 * Side display (*PMC / Scav*)
 * Activity duration tracking
@@ -19,8 +19,8 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 
 ## **Requirements**
 
-* **SPT 4.x**
-* **Fika** with API enabled
+* SPT 4.x
+* Fika
 * Discord webhook URL
 * ABPS if you want the Weekly boss tracking to work.
 
@@ -34,5 +34,5 @@ Shows online players, raid status, activity, and optional Weekly Boss informatio
 
    * `Discord.WebhookUrl`
    * `Fika.ApiKey`
-   * `Fika.BaseUrl`
+   * `LogFolderPath`
 4. Start the SPT server.
