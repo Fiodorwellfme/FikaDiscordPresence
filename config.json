@@ -1,0 +1,181 @@
+{
+  // Master on/off switch for the mod.
+  // true  = mod runs and posts/edits the Discord message
+  // false = mod does nothing (but still loads)
+  "Enabled": true,
+
+  "Discord": {
+    // REQUIRED.
+    // Paste your Discord webhook URL here.
+    "WebhookUrl": "",
+
+    // Optional: overrides the webhook's default "name" shown on messages.
+    "Username": "Fika Status",
+
+    // Optional: webhook avatar image URL. Leave "" to use the webhook's default.
+    // Must be a direct image URL (png/jpg/webp).
+    "AvatarUrl": "",
+
+    // Optional: Discord text-to-speech. Usually keep false.
+    "Tts": false,
+
+    // Optional: Forces the mod to edit an existing webhook message instead of creating a new one.
+    // 0 = let the mod create a message and remember its id in StateFile
+    // >0 = always edit THIS message id (advanced; do this only if you know what you're doing)
+    "StatusMessageId": 0,
+
+    // Where the mod stores the last created message id (when StatusMessageId == 0).
+    // This file is created INSIDE the mod folder.
+    "StateFile": "message_Id.json"
+  },
+
+  "Fika": {
+    "BaseUrl": "https://127.0.0.1:6969",
+
+    // REQUIRED.
+    // Your Fika API key. If this is blank/wrong you will get 401 Unauthorized.
+    "ApiKey": "",
+
+    "IgnoreSslErrors": true,
+
+    // How long we wait for the Fika endpoints before giving up.
+    // This value is "startup-only"
+    "TimeoutSeconds": 10
+  },
+
+  "Update": {
+    // How often (in seconds) the mod refreshes data and updates the Discord embed.
+    // This value IS safe to change live; it takes effect next loop.
+    "IntervalSeconds": 30
+  },
+
+  "LogMonitor": {
+    // Enables weekly boss parsing from SPT server logs.
+    // true  = read log file and try to find "Weekly Boss" lines
+    // false = skip log reading entirely
+    "Enabled": false,
+
+    // Folder where SPT logs live. Must be the DIRECTORY containing spt*.log files.
+    // JSON treats backslash \ as an escape character.
+    // Use double backslashes like: "X:\\Your\\Tarkov\\Folder\\SPT\\user\\logs\\spt"
+    "LogFolderPath": ""
+  },
+
+  "Text": {
+    // Embed title in Discord.
+    "Title": "Fika Server Status",
+
+    // Shown when no players are online.
+    // Discord supports Markdown in embeds.
+    "NoOnlineDescription": "🌵💨 _No one is online right now._",
+
+    // Section titles + empty messages.
+    "InRaidTitle": "⚔️ In Raid",
+    "InRaidEmpty": "_Nobody currently in raid._",
+
+    "OutOfRaidTitle": "🧩 Playing Tetris",
+    "OutOfRaidEmpty": "_Everyone online is in raid._",
+
+    // Weekly boss label.
+    // With your code change, this can show even if no one is online.
+    "BossTitle": "👑 Boss of the Week",
+
+    // Footer prefix (timestamp is added by the mod).
+    "FooterPrefix": "Last updated:"
+  },
+
+  "Colors": {
+    // Embed color as a DECIMAL integer (not hex).
+    // Example: 3447003 is Discord-ish blue.
+    // If you want to use a hex color like #ff0000:
+    // convert it to decimal first (0xFF0000 = 16711680).
+    "EmbedColorDecimal": 3447003
+  },
+
+  "Icons": {
+    // Used for defaults in the embed and map fallback.
+    "InRaid": "⚔️",
+    "OutOfRaid": "🧩",
+    "DefaultMap": "🗺️"
+  },
+
+  "MapEmoji": {
+    // Emoji shown next to map names in the In Raid list.
+    // Keys must match the resolved map names you output (LocationNames values).
+    "Factory": "⚙️",
+    "Customs": "🏭",
+    "Woods": "🌲",
+    "Shoreline": "🌊",
+    "Interchange": "🛒",
+    "Reserve": "🛡️",
+    "Streets": "🏙️",
+    "Lighthouse": "💡",
+    "GroundZero": "🏗️",
+    "Laboratory": "🧪",
+    "Labyrinth": "🌀"
+  },
+
+  "LocationNames": {
+    // Mapping of Fika "location id" -> display string.
+    // These keys are strings because JSON object keys must be strings.
+    "0": "None",
+    "1": "Hideout",
+    "2": "Factory",
+    "3": "Customs",
+    "4": "Woods",
+    "5": "Shoreline",
+    "6": "Interchange",
+    "7": "Reserve",
+    "8": "Streets",
+    "9": "Lighthouse",
+    "10": "GroundZero",
+    "11": "Laboratory",
+    "12": "Labyrinth"
+  },
+
+  "ActivityNames": {
+    // Mapping of presence "activity" integer -> display string.
+    "0": "Menu",
+    "1": "Raid",
+    "2": "Stash",
+    "3": "Hideout",
+    "4": "Flea"
+  },
+
+  "SideNames": {
+    // Mapping of raid side -> display string.
+    "0": "PMC",
+    "1": "Scav"
+  },
+
+  "BossNames": {
+    // Boss internal id -> pretty name (used for Weekly Boss field).
+    "bossGluhar": "Glukhar",
+    "bossBoar": "Kaban",
+    "bossKilla": "Killa",
+    "bossKolontay": "Kollontay",
+    "bossKnight": "Knight",
+    "bossPartisan": "Partisan",
+    "bossBully": "Reshala",
+    "bossSanitar": "Sanitar",
+    "bossKojaniy": "Shturman",
+    "bossTagilla": "Tagilla"
+  },
+
+  "MapNamesLog": {
+    // Map internal id from logs -> display string (Weekly Boss map).
+    "factory4_day": "Factory",
+    "factory4_night": "Factory (Night)",
+    "bigmap": "Customs",
+    "woods": "Woods",
+    "shoreline": "Shoreline",
+    "interchange": "Interchange",
+    "rezervbase": "Reserve",
+    "laboratory": "Labs",
+    "lighthouse": "Lighthouse",
+    "tarkovstreets": "Streets of Tarkov",
+    "sandbox": "Ground Zero",
+    "sandbox_high": "Ground Zero",
+    "labyrinth": "The Labyrinth"
+  }
+}
