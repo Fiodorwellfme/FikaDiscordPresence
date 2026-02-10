@@ -1,5 +1,3 @@
-Explain every single line of the following .cs file to me like I know nothing about programming but at the end of your message I will know everything :
-
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Helpers;
@@ -976,3 +974,4 @@ public class LogMonitorLite
             WeeklyBossMap = null;
     }
 }
+
