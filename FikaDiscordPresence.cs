@@ -136,118 +136,183 @@ public class ReadJsonConfig(
             statusMessageId = state.StatusMessageId;
         }
 
+        // FIX 1: Track config values to detect when HttpClient needs recreation
+        bool ignoreSslErrors = config.Fika.IgnoreSslErrors;
+        int timeoutSeconds = config.Fika.TimeoutSeconds;
+        string baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
+        AuthenticationHeaderValue fikaHeaders = new("Bearer", config.Fika.ApiKey ?? "");
+
+        // FIX 2: Create disposable HttpClient
+        HttpClient? http = CreateHttpClient(config.Fika.IgnoreSslErrors, config.Fika.TimeoutSeconds);
+
+        // FIX 3: Track LogMonitor config to detect when it needs recreation
+        LogMonitorLite? logMon = null;
+        bool logMonEnabled = config.LogMonitor.Enabled;
+        string logMonPath = config.LogMonitor.LogFolderPath ?? "";
+        int logMonTzOffset = config.LogMonitor.TimezoneOffsetHours;
+        
+        if (config.LogMonitor.Enabled)
+        {
+            logMon = new LogMonitorLite(
+                config.LogMonitor.LogFolderPath ?? "",
+                TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours));
+        }
+
+        int loopCounter = 0; // FIX 4: Track iterations for periodic GC
+
+        try
+        {
+            while (true)
+            {
+                try
+                {
+                    // 🔁 Live reload config.json each cycle
+                    try
+                    {
+                        var json = File.ReadAllText(configPath, Encoding.UTF8);
+                        var reloaded = JsonSerializer.Deserialize<ModConfig>(json, _jsonOpts);
+                        if (reloaded != null)
+                        {
+                            config = reloaded;
+
+                            // FIX 5: Recreate HttpClient if SSL or timeout settings changed
+                            if (config.Fika.IgnoreSslErrors != ignoreSslErrors || 
+                                config.Fika.TimeoutSeconds != timeoutSeconds)
+                            {
+                                http?.Dispose();
+                                http = CreateHttpClient(config.Fika.IgnoreSslErrors, config.Fika.TimeoutSeconds);
+                                ignoreSslErrors = config.Fika.IgnoreSslErrors;
+                                timeoutSeconds = config.Fika.TimeoutSeconds;
+                            }
+
+                            // Refresh config-dependent variables
+                            baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
+                            fikaHeaders = new AuthenticationHeaderValue("Bearer", config.Fika.ApiKey ?? "");
+
+                            var newStatePath = Path.Combine(pathToMod, config.Discord.StateFile);
+                            if (!string.Equals(newStatePath, statePath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                statePath = newStatePath;
+                                state = LoadState(statePath);
+                            }
+
+                            // FIX 6: Recreate LogMonitor if config changed
+                            if (config.LogMonitor.Enabled != logMonEnabled ||
+                                config.LogMonitor.LogFolderPath != logMonPath ||
+                                config.LogMonitor.TimezoneOffsetHours != logMonTzOffset)
+                            {
+                                logMon?.Dispose();
+                                logMon = null;
+
+                                logMonEnabled = config.LogMonitor.Enabled;
+                                logMonPath = config.LogMonitor.LogFolderPath ?? "";
+                                logMonTzOffset = config.LogMonitor.TimezoneOffsetHours;
+
+                                if (config.LogMonitor.Enabled)
+                                {
+                                    logMon = new LogMonitorLite(
+                                        config.LogMonitor.LogFolderPath ?? "",
+                                        TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours));
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
+                    }
+
+                    if (!config.Enabled)
+                    {
+                        await Task.Delay(5000);
+                        continue;
+                    }
+
+                    if (logMon != null)
+                    {
+                        logMon.Poll();
+                    }
+
+                    var players = await GetOnlinePlayers(http!, baseUrl, fikaHeaders);
+                    var presence = await GetPresence(http!, baseUrl, fikaHeaders);
+
+                    var presenceByNick = new Dictionary<string, PresenceEntry>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var p in presence)
+                    {
+                        if (!string.IsNullOrWhiteSpace(p.Nickname))
+                            presenceByNick[p.Nickname] = p;
+                    }
+
+                    var embed = RenderEmbed(config, players, presenceByNick, logMon?.WeeklyBoss, logMon?.WeeklyBossMap);
+
+                    if (statusMessageId is null || statusMessageId == 0)
+                    {
+                        var created = await WebhookCreateMessage(http!, config, embed);
+
+                        if (ulong.TryParse(created.Id, out var mid) && mid > 0)
+                        {
+                            statusMessageId = mid;
+
+                            if (config.Discord.StatusMessageId <= 0)
+                            {
+                                state.StatusMessageId = mid;
+                                SaveState(statePath, state);
+                            }
+                        }
+                        else
+                        {
+                            statusMessageId = 0;
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            await WebhookEditMessage(http!, config, statusMessageId.Value, embed);
+                        }
+                        catch (HttpRequestException ex) when (ex.Message.Contains("404"))
+                        {
+                            statusMessageId = 0;
+                        }
+                    }
+
+                    // FIX 7: Periodic garbage collection hint for long-running process
+                    loopCounter++;
+                    if (loopCounter % 100 == 0)
+                    {
+                        GC.Collect(1, GCCollectionMode.Optimized, blocking: false);
+                    }
+                }
+                catch (Exception e)
+                {
+                    logger.Error($"Update error: {e}");
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, config.Update.IntervalSeconds)));
+            }
+        }
+        finally
+        {
+            // FIX 8: Ensure cleanup on exit
+            http?.Dispose();
+            logMon?.Dispose();
+        }
+    }
+
+    // FIX 9: Extract HttpClient creation to separate method
+    private static HttpClient CreateHttpClient(bool ignoreSslErrors, int timeoutSeconds)
+    {
         var httpHandler = new HttpClientHandler();
-        if (config.Fika.IgnoreSslErrors)
+        if (ignoreSslErrors)
         {
             httpHandler.ServerCertificateCustomValidationCallback =
                 HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
         }
 
-        using var http = new HttpClient(httpHandler)
+        return new HttpClient(httpHandler)
         {
-            Timeout = TimeSpan.FromSeconds(Math.Max(1, config.Fika.TimeoutSeconds))
+            Timeout = TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds))
         };
-
-        var baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
-        AuthenticationHeaderValue fikaHeaders = new("Bearer", config.Fika.ApiKey ?? "");
-
-        var logMon = config.LogMonitor.Enabled
-            ? new LogMonitorLite(
-                config.LogMonitor.LogFolderPath ?? "",
-                TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours))
-            : null;
-
-        while (true)
-        {
-            try
-            {
-                // 🔁 Live reload config.json each cycle
-                try
-                {
-                    var json = File.ReadAllText(configPath, Encoding.UTF8);
-                    var reloaded = JsonSerializer.Deserialize<ModConfig>(json, _jsonOpts);
-                    if (reloaded != null)
-                    {
-                        config = reloaded;
-
-                        // refresh config-dependent variables
-                        baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
-                        fikaHeaders = new AuthenticationHeaderValue("Bearer", config.Fika.ApiKey ?? "");
-
-                        var newStatePath = Path.Combine(pathToMod, config.Discord.StateFile);
-                        if (!string.Equals(newStatePath, statePath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            statePath = newStatePath;
-                            state = LoadState(statePath);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
-                }
-
-                if (!config.Enabled)
-                {
-                    await Task.Delay(5000);
-                    continue;
-                }
-
-                if (logMon != null)
-                {
-                    logMon.Poll();
-                }
-
-                var players = await GetOnlinePlayers(http, baseUrl, fikaHeaders);
-                var presence = await GetPresence(http, baseUrl, fikaHeaders);
-
-                var presenceByNick = new Dictionary<string, PresenceEntry>(StringComparer.OrdinalIgnoreCase);
-                foreach (var p in presence)
-                {
-                    if (!string.IsNullOrWhiteSpace(p.Nickname))
-                        presenceByNick[p.Nickname] = p;
-                }
-
-                var embed = RenderEmbed(config, players, presenceByNick, logMon?.WeeklyBoss, logMon?.WeeklyBossMap);
-
-                if (statusMessageId is null || statusMessageId == 0)
-                {
-                    var created = await WebhookCreateMessage(http, config, embed);
-
-                    if (ulong.TryParse(created.Id, out var mid) && mid > 0)
-                    {
-                        statusMessageId = mid;
-
-                        if (config.Discord.StatusMessageId <= 0)
-                        {
-                            state.StatusMessageId = mid;
-                            SaveState(statePath, state);
-                        }
-                    }
-                    else
-                    {
-                        statusMessageId = 0;
-                    }
-                }
-                else
-                {
-                    try
-                    {
-                        await WebhookEditMessage(http, config, statusMessageId.Value, embed);
-                    }
-                    catch (HttpRequestException ex) when (ex.Message.Contains("404"))
-                    {
-                        statusMessageId = 0;
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                logger.Error($"Update error: {e}");
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, config.Update.IntervalSeconds)));
-        }
     }
 
     private EmbedPayload RenderEmbed(
@@ -469,9 +534,10 @@ public class ReadJsonConfig(
         }
     }
 
+    // FIX 10: Explicitly dispose HttpRequestMessage
     private async Task<List<OnlinePlayer>> GetOnlinePlayers(HttpClient http, string baseUrl, AuthenticationHeaderValue auth)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/fika/api/players");
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/fika/api/players");
         req.Headers.Authorization = auth;
         req.Headers.Add("responsecompressed", "0");
 
@@ -500,7 +566,7 @@ public class ReadJsonConfig(
 
     private async Task<List<PresenceEntry>> GetPresence(HttpClient http, string baseUrl, AuthenticationHeaderValue auth)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/fika/presence/get");
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/fika/presence/get");
         req.Headers.Authorization = auth;
         req.Headers.Add("responsecompressed", "0");
 
@@ -598,7 +664,7 @@ public class ReadJsonConfig(
 
         var body = JsonSerializer.Serialize(payload, _jsonOpts);
 
-        var req = new HttpRequestMessage(new HttpMethod("PATCH"), patchUrl)
+        using var req = new HttpRequestMessage(new HttpMethod("PATCH"), patchUrl)
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json")
         };
@@ -815,17 +881,18 @@ public class BotState
 }
 
 // --- Log monitor (weekly boss) ---
-public class LogMonitorLite
+// FIX 11: Make LogMonitorLite implement IDisposable
+public class LogMonitorLite : IDisposable
 {
     private readonly string _logFolderPath;
-    private readonly TimeSpan _tzOffset; // currently unused but kept for future
+    private readonly TimeSpan _tzOffset;
     private string? _logFilePath;
     private long _pos;
+    private bool _disposed;
 
     public string? WeeklyBoss { get; private set; }
     public string? WeeklyBossMap { get; private set; }
 
-    // IMPORTANT: values must match your config.MapNamesLog keys (lowercase, underscores)
     private static readonly Dictionary<string, string> BossToMapKey =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -867,7 +934,6 @@ public class LogMonitorLite
                 ProcessLine(line, initialLoad: true);
             }
 
-            // start tailing from end
             _pos = fs.Position;
         }
         catch
@@ -902,6 +968,8 @@ public class LogMonitorLite
 
     public void Poll()
     {
+        if (_disposed) return;
+
         if (_logFilePath == null || !File.Exists(_logFilePath))
         {
             InitFile();
@@ -931,7 +999,6 @@ public class LogMonitorLite
 
     private void ProcessLine(string line, bool initialLoad)
     {
-        // 1) ABPS/acidbotplacementsystem line (best signal: includes map)
         if (line.Contains("Weekly Boss:") && line.Contains("_botplacementsystem"))
         {
             var m = Regex.Match(
@@ -948,8 +1015,6 @@ public class LogMonitorLite
             return;
         }
 
-        // 2) Fallback: core SPT line (no map)
-        // Example: "[...][Debug][SPTarkov.Server.Core.Services.PostDbLoadService] bossTagilla is boss of the week"
         if (line.IndexOf(" is boss of the week", StringComparison.OrdinalIgnoreCase) < 0)
             return;
 
@@ -961,17 +1026,25 @@ public class LogMonitorLite
         if (!m2.Success)
             return;
 
-        // Don't overwrite ABPS-derived boss+map
         if (!string.IsNullOrWhiteSpace(WeeklyBoss) && !string.IsNullOrWhiteSpace(WeeklyBossMap))
             return;
 
         WeeklyBoss = m2.Groups[1].Value;
 
-        // Derive map key to match config.MapNamesLog keys
         if (BossToMapKey.TryGetValue(WeeklyBoss, out var mapKey))
             WeeklyBossMap = mapKey;
         else
             WeeklyBossMap = null;
     }
-}
 
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        
+        // Clear references to help GC
+        _logFilePath = null;
+        WeeklyBoss = null;
+        WeeklyBossMap = null;
+    }
+}
