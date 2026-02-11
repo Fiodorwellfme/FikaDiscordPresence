@@ -15,7 +15,7 @@ namespace _FikaDiscordPresence;
 
 public record ModMetadata : AbstractModMetadata
 {
-    public override string ModGuid { get; init; } = "com.fikadiscordpresence.fiodor";
+    public override string ModGuid { get; init; } = "com.fiodor.fikadiscordpresence";
     public override string Name { get; init; } = "Fika Discord Presence";
     public override string Author { get; init; } = "Fiodor";
     public override List<string>? Contributors { get; init; }
@@ -1048,4 +1048,5 @@ public class LogMonitorLite : IDisposable
         WeeklyBossMap = null;
     }
 }
+
 
