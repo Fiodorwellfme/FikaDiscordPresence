@@ -19,9 +19,8 @@ public record ModMetadata : AbstractModMetadata
     public override string Name { get; init; } = "Fika Discord Presence";
     public override string Author { get; init; } = "Fiodor";
     public override List<string>? Contributors { get; init; }
-    public override SemanticVersioning.Version Version { get; init; } = new("1.0.2");
+    public override SemanticVersioning.Version Version { get; init; } = new("1.0.3");
     public override SemanticVersioning.Range SptVersion { get; init; } = new("~4.0.0");
-
     public override List<string>? Incompatibilities { get; init; }
     public override Dictionary<string, SemanticVersioning.Range>? ModDependencies { get; init; }
     public override string? Url { get; init; }
@@ -30,10 +29,13 @@ public record ModMetadata : AbstractModMetadata
 }
 
 [Injectable(TypePriority = int.MaxValue)]
-public class ReadJsonConfig(
-    ISptLogger<ReadJsonConfig> logger,
-    ModHelper modHelper) : IOnLoad
+public class ReadJsonConfig(ISptLogger<ReadJsonConfig> logger, ModHelper modHelper) : IOnLoad
 {
+    private const string StateFileName = "message_Id.json";
+    private const bool DiscordTts = false;
+    private const bool IgnoreSslErrors = true;
+    private const int TimeoutSeconds = 10;
+
     private readonly JsonSerializerOptions _jsonOpts = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -45,39 +47,25 @@ public class ReadJsonConfig(
     {
         var errors = new List<string>();
 
-        // Webhook validation
         if (string.IsNullOrWhiteSpace(config.Discord.WebhookUrl))
-        {
             errors.Add("Discord.WebhookUrl is missing or empty.");
-        }
 
-        // API key validation
         if (string.IsNullOrWhiteSpace(config.Fika.ApiKey))
-        {
             errors.Add("Fika.ApiKey is missing or empty.");
-        }
 
-        // Log path validation (only if enabled)
         if (config.LogMonitor.Enabled)
         {
-            if (string.IsNullOrWhiteSpace(config.LogMonitor.LogFolderPath))
-            {
-                errors.Add("LogMonitor.LogFolderPath is missing or empty.");
-            }
-            else if (!Directory.Exists(config.LogMonitor.LogFolderPath))
-            {
-                errors.Add($"LogMonitor.LogFolderPath does not exist: {config.LogMonitor.LogFolderPath}");
-            }
+            var logPath = GetDefaultLogFolderFromModPath(modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly()));
+            if (string.IsNullOrWhiteSpace(logPath))
+                errors.Add("LogMonitor enabled but could not resolve default log folder path.");
+            else if (!Directory.Exists(logPath))
+                errors.Add($"LogMonitor enabled but log folder does not exist: {logPath}");
         }
 
         if (errors.Count > 0)
         {
             logger.Error("Fika Discord Presence configuration error:");
-            foreach (var e in errors)
-            {
-                logger.Error($"  - {e}");
-            }
-
+            errors.ForEach(e => logger.Error($"  - {e}"));
             logger.Error("Fix config.json and restart the server.");
             return false;
         }
@@ -90,12 +78,6 @@ public class ReadJsonConfig(
         var pathToMod = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
         var config = modHelper.GetJsonDataFromFile<ModConfig>(pathToMod, "config.json");
 
-        if (!config.Enabled)
-        {
-            logger.Info("Mod disabled via config.json");
-            return Task.CompletedTask;
-        }
-
         if (!ValidateConfig(config, logger))
         {
             logger.Error("Mod will NOT start due to invalid configuration.");
@@ -104,14 +86,8 @@ public class ReadJsonConfig(
 
         _ = Task.Run(async () =>
         {
-            try
-            {
-                await RunLoop(logger, pathToMod, config);
-            }
-            catch (Exception e)
-            {
-                logger.Error($"RunLoop error: {e}");
-            }
+            try { await RunLoop(logger, pathToMod, config); }
+            catch (Exception e) { logger.Error($"RunLoop error: {e}"); }
         });
 
         return Task.CompletedTask;
@@ -121,167 +97,53 @@ public class ReadJsonConfig(
     {
         var config = initialConfig;
         var configPath = Path.Combine(pathToMod, "config.json");
-
-        string statePath = Path.Combine(pathToMod, config.Discord.StateFile);
+        string statePath = Path.Combine(pathToMod, StateFileName);
         BotState state = LoadState(statePath);
 
-        ulong? statusMessageId = null;
+        ulong? statusMessageId = config.Discord.StatusMessageId > 0 
+            ? (ulong)config.Discord.StatusMessageId 
+            : state.StatusMessageId > 0 ? state.StatusMessageId : null;
 
-        if (config.Discord.StatusMessageId > 0)
-        {
-            statusMessageId = (ulong)config.Discord.StatusMessageId;
-        }
-        else if (state.StatusMessageId > 0)
-        {
-            statusMessageId = state.StatusMessageId;
-        }
-
-        // FIX 1: Track config values to detect when HttpClient needs recreation
-        bool ignoreSslErrors = config.Fika.IgnoreSslErrors;
-        int timeoutSeconds = config.Fika.TimeoutSeconds;
-        string baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
-        AuthenticationHeaderValue fikaHeaders = new("Bearer", config.Fika.ApiKey ?? "");
-
-        // FIX 2: Create disposable HttpClient
-        HttpClient? http = CreateHttpClient(config.Fika.IgnoreSslErrors, config.Fika.TimeoutSeconds);
-
-        // FIX 3: Track LogMonitor config to detect when it needs recreation
+        HttpClient http = CreateHttpClient();
         LogMonitorLite? logMon = null;
         bool logMonEnabled = config.LogMonitor.Enabled;
-        string logMonPath = config.LogMonitor.LogFolderPath ?? "";
-        int logMonTzOffset = config.LogMonitor.TimezoneOffsetHours;
-        
-        if (config.LogMonitor.Enabled)
-        {
-            logMon = new LogMonitorLite(
-                config.LogMonitor.LogFolderPath ?? "",
-                TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours));
-        }
+        string resolvedLogPath = GetDefaultLogFolderFromModPath(pathToMod);
 
-        int loopCounter = 0; // FIX 4: Track iterations for periodic GC
+        if (config.LogMonitor.Enabled && Directory.Exists(resolvedLogPath))
+        {
+            logMon = new LogMonitorLite(resolvedLogPath, TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours));
+        }
 
         try
         {
             while (true)
             {
+                config = ReloadConfig(configPath, config, logger);
+                logMon = UpdateLogMonitor(logMon, config, ref logMonEnabled, resolvedLogPath, logger);
+
+                string baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
+                var fikaHeaders = new AuthenticationHeaderValue("Bearer", config.Fika.ApiKey ?? "");
+
                 try
                 {
-                    // 🔁 Live reload config.json each cycle
-                    try
-                    {
-                        var json = File.ReadAllText(configPath, Encoding.UTF8);
-                        var reloaded = JsonSerializer.Deserialize<ModConfig>(json, _jsonOpts);
-                        if (reloaded != null)
-                        {
-                            config = reloaded;
+                    logMon?.Poll();
 
-                            // FIX 5: Recreate HttpClient if SSL or timeout settings changed
-                            if (config.Fika.IgnoreSslErrors != ignoreSslErrors || 
-                                config.Fika.TimeoutSeconds != timeoutSeconds)
-                            {
-                                http?.Dispose();
-                                http = CreateHttpClient(config.Fika.IgnoreSslErrors, config.Fika.TimeoutSeconds);
-                                ignoreSslErrors = config.Fika.IgnoreSslErrors;
-                                timeoutSeconds = config.Fika.TimeoutSeconds;
-                            }
-
-                            // Refresh config-dependent variables
-                            baseUrl = (config.Fika.BaseUrl ?? "").Trim().TrimEnd('/');
-                            fikaHeaders = new AuthenticationHeaderValue("Bearer", config.Fika.ApiKey ?? "");
-
-                            var newStatePath = Path.Combine(pathToMod, config.Discord.StateFile);
-                            if (!string.Equals(newStatePath, statePath, StringComparison.OrdinalIgnoreCase))
-                            {
-                                statePath = newStatePath;
-                                state = LoadState(statePath);
-                            }
-
-                            // FIX 6: Recreate LogMonitor if config changed
-                            if (config.LogMonitor.Enabled != logMonEnabled ||
-                                config.LogMonitor.LogFolderPath != logMonPath ||
-                                config.LogMonitor.TimezoneOffsetHours != logMonTzOffset)
-                            {
-                                logMon?.Dispose();
-                                logMon = null;
-
-                                logMonEnabled = config.LogMonitor.Enabled;
-                                logMonPath = config.LogMonitor.LogFolderPath ?? "";
-                                logMonTzOffset = config.LogMonitor.TimezoneOffsetHours;
-
-                                if (config.LogMonitor.Enabled)
-                                {
-                                    logMon = new LogMonitorLite(
-                                        config.LogMonitor.LogFolderPath ?? "",
-                                        TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours));
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
-                    }
-
-                    if (!config.Enabled)
-                    {
-                        await Task.Delay(5000);
-                        continue;
-                    }
-
-                    if (logMon != null)
-                    {
-                        logMon.Poll();
-                    }
-
-                    var players = await GetOnlinePlayers(http!, baseUrl, fikaHeaders);
-                    var presence = await GetPresence(http!, baseUrl, fikaHeaders);
-
-                    var presenceByNick = new Dictionary<string, PresenceEntry>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var p in presence)
-                    {
-                        if (!string.IsNullOrWhiteSpace(p.Nickname))
-                            presenceByNick[p.Nickname] = p;
-                    }
-
+                    var players = await GetOnlinePlayers(http, baseUrl, fikaHeaders);
+                    var presence = await GetPresence(http, baseUrl, fikaHeaders);
+                    var presenceByNick = BuildPresenceDict(presence);
                     var embed = RenderEmbed(config, players, presenceByNick, logMon?.WeeklyBoss, logMon?.WeeklyBossMap);
 
-                    if (statusMessageId is null || statusMessageId == 0)
-                    {
-                        var created = await WebhookCreateMessage(http!, config, embed);
-
-                        if (ulong.TryParse(created.Id, out var mid) && mid > 0)
-                        {
-                            statusMessageId = mid;
-
-                            if (config.Discord.StatusMessageId <= 0)
-                            {
-                                state.StatusMessageId = mid;
-                                SaveState(statePath, state);
-                            }
-                        }
-                        else
-                        {
-                            statusMessageId = 0;
-                        }
-                    }
-                    else
-                    {
-                        try
-                        {
-                            await WebhookEditMessage(http!, config, statusMessageId.Value, embed);
-                        }
-                        catch (HttpRequestException ex) when (ex.Message.Contains("404"))
-                        {
-                            statusMessageId = 0;
-                        }
-                    }
-
-                    // FIX 7: Periodic garbage collection hint for long-running process
-                    loopCounter++;
-                    if (loopCounter % 100 == 0)
-                    {
-                        GC.Collect(1, GCCollectionMode.Optimized, blocking: false);
-                    }
+                    statusMessageId = await UpdateDiscordMessage(http, config, embed, statusMessageId, state, statePath);
+                }
+                catch (TaskCanceledException)
+                {
+                    logger.Error("Fika API request timed out. Stopping mod updates.");
+                    return;
+                }
+                catch (HttpRequestException ex)
+                {
+                    logger.Error($"Fika API request failed: {ex.Message}. Stopping mod updates.");
+                    return;
                 }
                 catch (Exception e)
                 {
@@ -293,231 +155,229 @@ public class ReadJsonConfig(
         }
         finally
         {
-            // FIX 8: Ensure cleanup on exit
-            http?.Dispose();
+            http.Dispose();
             logMon?.Dispose();
         }
     }
 
-    // FIX 9: Extract HttpClient creation to separate method
-    private static HttpClient CreateHttpClient(bool ignoreSslErrors, int timeoutSeconds)
+    private ModConfig ReloadConfig(string configPath, ModConfig current, ISptLogger<ReadJsonConfig> logger)
     {
-        var httpHandler = new HttpClientHandler();
-        if (ignoreSslErrors)
+        try
         {
-            httpHandler.ServerCertificateCustomValidationCallback =
-                HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+            var json = File.ReadAllText(configPath, Encoding.UTF8);
+            var reloaded = JsonSerializer.Deserialize<ModConfig>(json, _jsonOpts);
+            return reloaded ?? current;
         }
-
-        return new HttpClient(httpHandler)
+        catch (Exception ex)
         {
-            Timeout = TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds))
-        };
+            logger.Warning($"Failed to reload config.json — keeping previous config. ({ex.Message})");
+            return current;
+        }
     }
 
-    private EmbedPayload RenderEmbed(
-        ModConfig config,
-        List<OnlinePlayer> players,
-        Dictionary<string, PresenceEntry> presenceByNick,
-        string? weeklyBoss,
-        string? weeklyBossMap)
+    private LogMonitorLite? UpdateLogMonitor(LogMonitorLite? current, ModConfig config, 
+        ref bool wasEnabled, string logPath, ISptLogger<ReadJsonConfig> logger)
+    {
+        if (config.LogMonitor.Enabled == wasEnabled) return current;
+
+        current?.Dispose();
+        wasEnabled = config.LogMonitor.Enabled;
+
+        if (!config.LogMonitor.Enabled) return null;
+
+        if (Directory.Exists(logPath))
+            return new LogMonitorLite(logPath, TimeSpan.FromHours(config.LogMonitor.TimezoneOffsetHours));
+
+        logger.Error($"LogMonitor enabled but log folder not found: {logPath}");
+        return null;
+    }
+
+    private async Task<ulong?> UpdateDiscordMessage(HttpClient http, ModConfig config, EmbedPayload embed, 
+        ulong? currentId, BotState state, string statePath)
+    {
+        if (currentId is null || currentId == 0)
+        {
+            var created = await WebhookCreateMessage(http, config, embed);
+            if (ulong.TryParse(created.Id, out var mid) && mid > 0)
+            {
+                if (config.Discord.StatusMessageId <= 0)
+                {
+                    state.StatusMessageId = mid;
+                    SaveState(statePath, state);
+                }
+                return mid;
+            }
+            return 0;
+        }
+
+        try
+        {
+            await WebhookEditMessage(http, config, currentId.Value, embed);
+            return currentId;
+        }
+        catch (HttpRequestException ex) when (ex.Message.Contains("404"))
+        {
+            return 0;
+        }
+    }
+
+    private static Dictionary<string, PresenceEntry> BuildPresenceDict(List<PresenceEntry> presence)
+    {
+        var dict = new Dictionary<string, PresenceEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in presence)
+        {
+            if (!string.IsNullOrWhiteSpace(p.Nickname))
+                dict[p.Nickname] = p;
+        }
+        return dict;
+    }
+
+    private static string GetDefaultLogFolderFromModPath(string pathToMod)
+    {
+        try
+        {
+            var userDir = new DirectoryInfo(pathToMod).Parent?.Parent;
+            return userDir == null ? "" : Path.Combine(userDir.FullName, "logs", "spt");
+        }
+        catch { return ""; }
+    }
+
+    private static HttpClient CreateHttpClient()
+    {
+        var httpHandler = new HttpClientHandler();
+        if (IgnoreSslErrors)
+            httpHandler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+        return new HttpClient(httpHandler);
+    }
+
+    private string GetConfigValue(Dictionary<string, string> dict, string key, string fallback) =>
+        dict.TryGetValue(key, out var value) ? value : fallback;
+
+    private string GetBossDisplay(ModConfig config, string boss, string? map)
+    {
+        var bossName = GetConfigValue(config.BossNames, boss, boss);
+        if (string.IsNullOrWhiteSpace(map)) return $"**{bossName}**";
+        var mapDisp = GetConfigValue(config.MapNamesLog, map, map);
+        return $"**{bossName}** on **{mapDisp}**";
+    }
+
+    private (List<OnlinePlayer> inRaid, List<OnlinePlayer> tetris) CategorizePlayers(
+        List<OnlinePlayer> players, Dictionary<string, PresenceEntry> presenceByNick)
     {
         var inRaid = new List<OnlinePlayer>();
         var tetris = new List<OnlinePlayer>();
 
         foreach (var p in players)
         {
-            presenceByNick.TryGetValue(p.Nickname, out var pres);
-
-            if (pres != null && pres.Activity == 1)
-            {
-                inRaid.Add(p);
-            }
-            else
-            {
-                if (p.LocationId is not (0 or 1))
-                    inRaid.Add(p);
-                else
-                    tetris.Add(p);
-            }
+            var isInRaid = (presenceByNick.TryGetValue(p.Nickname, out var pres) && pres.Activity == 1) 
+                           || p.LocationId is not (0 or 1);
+            (isInRaid ? inRaid : tetris).Add(p);
         }
+
+        return (inRaid, tetris);
+    }
+
+    private string FormatInRaidPlayer(OnlinePlayer p, ModConfig config, Dictionary<string, PresenceEntry> presenceByNick)
+    {
+        var mapName = GetConfigValue(config.LocationNames, p.LocationId.ToString(), $"Unknown({p.LocationId})");
+        var mapEmoji = GetConfigValue(config.MapEmoji, mapName, config.Icons.DefaultMap);
+        
+        var extra = "";
+        if (presenceByNick.TryGetValue(p.Nickname, out var pres))
+        {
+            var parts = new List<string>();
+            if (pres.Activity == 1 && pres.Side is not null)
+                parts.Add(GetConfigValue(config.SideNames, pres.Side.Value.ToString(), "Unknown"));
+            
+            var since = FmtSince(pres.ActivityStartedTimestamp);
+            if (!string.IsNullOrWhiteSpace(since)) parts.Add(since);
+            
+            if (parts.Count > 0) extra = $" — _{string.Join(" · ", parts)}_";
+        }
+
+        return $"• **{p.Nickname}** — {mapEmoji} {mapName}{extra}";
+    }
+
+    private string FormatOutOfRaidPlayer(
+    OnlinePlayer p,
+    ModConfig config,
+    Dictionary<string, PresenceEntry> presenceByNick)
+    {
+        if (presenceByNick.TryGetValue(p.Nickname, out var pres))
+        {
+            var activityName = GetConfigValue(config.ActivityNames, pres.Activity.ToString(), $"Activity({pres.Activity})");
+            var since = FmtSince(pres.ActivityStartedTimestamp);
+            var detailText = string.IsNullOrWhiteSpace(since) ? activityName : $"{activityName} · {since}";
+            var icon = pres.Activity switch { 3 => "🏠", 0 => "📋", 2 => "🧰", 4 => "🛒", _ => "🧩" };
+            return $"• **{p.Nickname}** — {icon} {detailText}";
+        }
+
+        var loc = GetConfigValue(config.LocationNames, p.LocationId.ToString(), $"Unknown({p.LocationId})");
+        var fallbackText = loc == "Hideout" ? "🏠 Hideout" : "📋 Menu";
+        return $"• **{p.Nickname}** — {fallbackText}";
+    }
+
+
+    private EmbedPayload RenderEmbed(ModConfig config, List<OnlinePlayer> players, 
+        Dictionary<string, PresenceEntry> presenceByNick, string? weeklyBoss, string? weeklyBossMap)
+    {
+        var (inRaid, tetris) = CategorizePlayers(players, presenceByNick);
 
         var embed = new EmbedPayload
         {
             Title = config.Text.Title,
             Color = config.Colors.EmbedColorDecimal,
-            Fields = new List<EmbedFieldPayload>()
+            Fields = []
         };
 
         if (players.Count == 0)
         {
             if (!string.IsNullOrWhiteSpace(weeklyBoss))
-            {
-                var bossName = config.BossNames.TryGetValue(weeklyBoss!, out var bn) ? bn : weeklyBoss!;
-                var mapDisp = "";
+                embed.Fields.Add(new() { Name = config.Text.BossTitle, Value = GetBossDisplay(config, weeklyBoss, weeklyBossMap), Inline = false });
 
-                if (!string.IsNullOrWhiteSpace(weeklyBossMap))
-                {
-                    mapDisp = config.MapNamesLog.TryGetValue(weeklyBossMap!, out var mn)
-                        ? mn
-                        : weeklyBossMap!;
-                }
-
-                var bossInfo = string.IsNullOrWhiteSpace(mapDisp)
-                    ? $"**{bossName}**"
-                    : $"**{bossName}** on **{mapDisp}**";
-
-                embed.Fields.Add(new EmbedFieldPayload
-                {
-                    Name = config.Text.BossTitle,
-                    Value = bossInfo,
-                    Inline = false
-                });
-            }
-
-            embed.Fields.Add(new EmbedFieldPayload
-            {
-                Name = "\u200b",
-                Value = config.Text.NoOnlineDescription,
-                Inline = false
-            });
-
-            embed.Footer = new EmbedFooterPayload
-            {
-                Text = $"{config.Text.FooterPrefix} {DateTime.Now:yyyy-MM-dd HH:mm:ss}"
-            };
-
+            embed.Fields.Add(new() { Name = "\u200b", Value = config.Text.NoOnlineDescription, Inline = false });
+            embed.Footer = new() { Text = $"{config.Text.FooterPrefix} {DateTime.Now:yyyy-MM-dd HH:mm:ss}" };
             return embed;
         }
 
         if (!string.IsNullOrWhiteSpace(weeklyBoss))
-        {
-            var bossName = config.BossNames.TryGetValue(weeklyBoss!, out var bn) ? bn : weeklyBoss!;
-            var mapDisp = "";
+            embed.Fields.Add(new() { Name = config.Text.BossTitle, Value = GetBossDisplay(config, weeklyBoss, weeklyBossMap), Inline = false });
 
-            if (!string.IsNullOrWhiteSpace(weeklyBossMap))
-            {
-                mapDisp = config.MapNamesLog.TryGetValue(weeklyBossMap!, out var mn)
-                    ? mn
-                    : weeklyBossMap!;
-            }
-
-            var bossInfo = string.IsNullOrWhiteSpace(mapDisp)
-                ? $"**{bossName}**"
-                : $"**{bossName}** on **{mapDisp}**";
-
-            embed.Fields.Add(new EmbedFieldPayload { Name = config.Text.BossTitle, Value = bossInfo, Inline = false });
-        }
-
-        // In Raid field
         if (inRaid.Count > 0)
         {
             inRaid.Sort((a, b) => string.Compare(a.Nickname, b.Nickname, StringComparison.OrdinalIgnoreCase));
-            var lines = new List<string>();
-
-            foreach (var p in inRaid)
-            {
-                var mapName = config.LocationNames.TryGetValue(p.LocationId.ToString(), out var ln) ? ln : $"Unknown({p.LocationId})";
-                var mapEmoji = config.MapEmoji.TryGetValue(mapName, out var me) ? me : config.Icons.DefaultMap;
-
-                var extra = "";
-                if (presenceByNick.TryGetValue(p.Nickname, out var pres) && pres != null)
-                {
-                    string? side = null;
-                    if (pres.Activity == 1 && pres.Side is not null)
-                    {
-                        var key = pres.Side.Value.ToString();
-                        side = config.SideNames.TryGetValue(key, out var sn) ? sn : "Unknown";
-                    }
-
-                    var since = FmtSince(pres.ActivityStartedTimestamp);
-                    var parts = new List<string>();
-                    if (!string.IsNullOrWhiteSpace(side)) parts.Add(side);
-                    if (!string.IsNullOrWhiteSpace(since)) parts.Add(since);
-
-                    if (parts.Count > 0)
-                        extra = $" — _{string.Join(" · ", parts)}_";
-                }
-
-                lines.Add($"• **{p.Nickname}** — {mapEmoji} {mapName}{extra}");
-            }
-
-            embed.Fields.Add(new EmbedFieldPayload
-            {
-                Name = config.Text.InRaidTitle,
-                Value = string.Join("\n", lines),
-                Inline = false
-            });
+            var lines = inRaid.Select(p => FormatInRaidPlayer(p, config, presenceByNick)).ToList();
+            embed.Fields.Add(new() { Name = config.Text.InRaidTitle, Value = string.Join("\n", lines), Inline = false });
         }
         else
         {
-            embed.Fields.Add(new EmbedFieldPayload
-            {
-                Name = config.Text.InRaidTitle,
-                Value = config.Text.InRaidEmpty,
-                Inline = false
-            });
+            embed.Fields.Add(new() { Name = config.Text.InRaidTitle, Value = config.Text.InRaidEmpty, Inline = false });
         }
 
-        // Tetris field
         if (tetris.Count > 0)
         {
             tetris.Sort((a, b) => string.Compare(a.Nickname, b.Nickname, StringComparison.OrdinalIgnoreCase));
-            var lines = new List<string>();
-
-            foreach (var p in tetris)
-            {
-                if (presenceByNick.TryGetValue(p.Nickname, out var pres) && pres != null)
-                {
-                    var actKey = pres.Activity.ToString();
-                    var activityName = config.ActivityNames.TryGetValue(actKey, out var an) ? an : $"Activity({pres.Activity})";
-                    var since = FmtSince(pres.ActivityStartedTimestamp);
-
-                    var detail = string.IsNullOrWhiteSpace(since) ? activityName : $"{activityName} · {since}";
-                    var icon = pres.Activity == 3 ? "🏠" : pres.Activity == 0 ? "📋" : pres.Activity == 2 ? "🧰" : pres.Activity == 4 ? "🛒" : "🧩";
-
-                    lines.Add($"• **{p.Nickname}** — {icon} {detail}");
-                }
-                else
-                {
-                    var loc = config.LocationNames.TryGetValue(p.LocationId.ToString(), out var ln) ? ln : $"Unknown({p.LocationId})";
-                    var detail = loc == "Hideout" ? "🏠 Hideout" : "📋 Menu";
-                    lines.Add($"• **{p.Nickname}** — {detail}");
-                }
-            }
-
-            embed.Fields.Add(new EmbedFieldPayload
-            {
-                Name = config.Text.OutOfRaidTitle,
-                Value = string.Join("\n", lines),
-                Inline = false
-            });
+            var lines = tetris.Select(p => FormatOutOfRaidPlayer(p, config, presenceByNick)).ToList();
+            embed.Fields.Add(new() { Name = config.Text.OutOfRaidTitle, Value = string.Join("\n", lines), Inline = false });
         }
         else
         {
-            embed.Fields.Add(new EmbedFieldPayload
-            {
-                Name = config.Text.OutOfRaidTitle,
-                Value = config.Text.OutOfRaidEmpty,
-                Inline = false
-            });
+            embed.Fields.Add(new() { Name = config.Text.OutOfRaidTitle, Value = config.Text.OutOfRaidEmpty, Inline = false });
         }
 
         var countsLine = $"{players.Count} Online | {inRaid.Count} In Raid | {tetris.Count} Playing Tetris";
-        embed.Fields.Add(new EmbedFieldPayload { Name = "\u200b", Value = $"**{countsLine}**", Inline = false });
-
-        embed.Footer = new EmbedFooterPayload { Text = $"{config.Text.FooterPrefix} {DateTime.Now:yyyy-MM-dd HH:mm:ss}" };
+        embed.Fields.Add(new() { Name = "\u200b", Value = $"**{countsLine}**", Inline = false });
+        embed.Footer = new() { Text = $"{config.Text.FooterPrefix} {DateTime.Now:yyyy-MM-dd HH:mm:ss}" };
+        
         return embed;
     }
 
     private static string FmtSince(long startedTs)
     {
         if (startedTs <= 0) return "";
-
         try
         {
-            var started = DateTimeOffset.FromUnixTimeSeconds(startedTs).LocalDateTime;
-            var delta = DateTime.Now - started;
+            var delta = DateTime.Now - DateTimeOffset.FromUnixTimeSeconds(startedTs).LocalDateTime;
             if (delta.TotalSeconds < 0) return "";
 
             var mins = (int)(delta.TotalSeconds / 60);
@@ -525,43 +385,34 @@ public class ReadJsonConfig(
             if (mins < 60) return $"{mins}m";
 
             var hrs = mins / 60;
-            var rem = mins % 60;
-            return $"{hrs}h{rem:00}m";
+            return $"{hrs}h{mins % 60:00}m";
         }
-        catch
-        {
-            return "";
-        }
+        catch { return ""; }
     }
 
-    // FIX 10: Explicitly dispose HttpRequestMessage
-    private async Task<List<OnlinePlayer>> GetOnlinePlayers(HttpClient http, string baseUrl, AuthenticationHeaderValue auth)
+    private async Task<T> FikaRequest<T>(HttpClient http, string endpoint, string baseUrl, AuthenticationHeaderValue auth)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/fika/api/players");
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}{endpoint}");
         req.Headers.Authorization = auth;
         req.Headers.Add("responsecompressed", "0");
 
-        using var resp = await http.SendAsync(req);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(TimeoutSeconds));
+        using var resp = await http.SendAsync(req, cts.Token);
         resp.EnsureSuccessStatusCode();
 
-        var json = await resp.Content.ReadAsStringAsync();
-        var data = JsonSerializer.Deserialize<PlayersResponse>(json, _jsonOpts);
+        var json = await resp.Content.ReadAsStringAsync(cts.Token);
+        return JsonSerializer.Deserialize<T>(json, _jsonOpts)!;
+    }
 
-        var outList = new List<OnlinePlayer>();
-        if (data?.Players != null)
+    private async Task<List<OnlinePlayer>> GetOnlinePlayers(HttpClient http, string baseUrl, AuthenticationHeaderValue auth)
+    {
+        var data = await FikaRequest<PlayersResponse>(http, "/fika/api/players", baseUrl, auth);
+        return data?.Players?.Select(p => new OnlinePlayer
         {
-            foreach (var p in data.Players)
-            {
-                outList.Add(new OnlinePlayer
-                {
-                    ProfileId = p.ProfileId ?? "",
-                    Nickname = p.Nickname ?? "",
-                    LocationId = (int)p.Location
-                });
-            }
-        }
-
-        return outList;
+            ProfileId = p.ProfileId ?? "",
+            Nickname = p.Nickname ?? "",
+            LocationId = (int)p.Location
+        }).ToList() ?? [];
     }
 
     private async Task<List<PresenceEntry>> GetPresence(HttpClient http, string baseUrl, AuthenticationHeaderValue auth)
@@ -570,11 +421,11 @@ public class ReadJsonConfig(
         req.Headers.Authorization = auth;
         req.Headers.Add("responsecompressed", "0");
 
-        using var resp = await http.SendAsync(req);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(TimeoutSeconds));
+        using var resp = await http.SendAsync(req, cts.Token);
         resp.EnsureSuccessStatusCode();
 
-        var json = await resp.Content.ReadAsStringAsync();
-
+        var json = await resp.Content.ReadAsStringAsync(cts.Token);
         var outList = new List<PresenceEntry>();
 
         try
@@ -593,32 +444,15 @@ public class ReadJsonConfig(
 
                     int? side = null;
                     if (el.TryGetProperty("raidInformation", out var rEl) && rEl.ValueKind == JsonValueKind.Object)
-                    {
                         if (rEl.TryGetProperty("side", out var sideEl) && sideEl.ValueKind is JsonValueKind.Number)
-                        {
                             side = sideEl.GetInt32();
-                        }
-                    }
 
-                    outList.Add(new PresenceEntry
-                    {
-                        Nickname = nick,
-                        Level = level,
-                        Activity = activity,
-                        ActivityStartedTimestamp = started,
-                        Side = side
-                    });
+                    outList.Add(new() { Nickname = nick, Level = level, Activity = activity, ActivityStartedTimestamp = started, Side = side });
                 }
-                catch
-                {
-                    // ignore
-                }
+                catch { }
             }
         }
-        catch
-        {
-            // ignore
-        }
+        catch { }
 
         return outList;
     }
@@ -626,50 +460,47 @@ public class ReadJsonConfig(
     private async Task<WebhookMessage> WebhookCreateMessage(HttpClient http, ModConfig config, EmbedPayload embed)
     {
         var url = (config.Discord.WebhookUrl ?? "").Trim();
-
-        // wait=true makes Discord return the created message JSON
-        var postUrl = url.Contains('?') ? $"{url}&wait=true" : $"{url}?wait=true";
+        var postUrl = $"{url}{(url.Contains('?') ? "&" : "?")}wait=true";
 
         var payload = new WebhookSendPayload
         {
             Content = null,
             Username = config.Discord.Username,
             AvatarUrl = config.Discord.AvatarUrl,
-            Tts = config.Discord.Tts,
-            Embeds = new List<EmbedPayload> { embed }
+            Tts = DiscordTts,
+            Embeds = [embed]
         };
 
         var body = JsonSerializer.Serialize(payload, _jsonOpts);
-        using var resp = await http.PostAsync(postUrl, new StringContent(body, Encoding.UTF8, "application/json"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(TimeoutSeconds));
+        using var resp = await http.PostAsync(postUrl, new StringContent(body, Encoding.UTF8, "application/json"), cts.Token);
         resp.EnsureSuccessStatusCode();
 
-        var json = await resp.Content.ReadAsStringAsync();
-        var msg = JsonSerializer.Deserialize<WebhookMessage>(json, _jsonOpts);
-        return msg ?? new WebhookMessage();
+        var json = await resp.Content.ReadAsStringAsync(cts.Token);
+        return JsonSerializer.Deserialize<WebhookMessage>(json, _jsonOpts) ?? new();
     }
 
     private async Task WebhookEditMessage(HttpClient http, ModConfig config, ulong messageId, EmbedPayload embed)
     {
-        var url = (config.Discord.WebhookUrl ?? "").Trim().TrimEnd('/');
-        var patchUrl = $"{url}/messages/{messageId}";
+        var patchUrl = $"{(config.Discord.WebhookUrl ?? "").Trim().TrimEnd('/')}/messages/{messageId}";
 
         var payload = new WebhookSendPayload
         {
             Content = null,
             Username = config.Discord.Username,
             AvatarUrl = config.Discord.AvatarUrl,
-            Tts = config.Discord.Tts,
-            Embeds = new List<EmbedPayload> { embed }
+            Tts = DiscordTts,
+            Embeds = [embed]
         };
 
         var body = JsonSerializer.Serialize(payload, _jsonOpts);
-
         using var req = new HttpRequestMessage(new HttpMethod("PATCH"), patchUrl)
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json")
         };
 
-        using var resp = await http.SendAsync(req);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(TimeoutSeconds));
+        using var resp = await http.SendAsync(req, cts.Token);
         resp.EnsureSuccessStatusCode();
     }
 
@@ -677,15 +508,11 @@ public class ReadJsonConfig(
     {
         try
         {
-            if (!File.Exists(path)) return new BotState();
-            var json = File.ReadAllText(path, Encoding.UTF8);
-            var s = JsonSerializer.Deserialize<BotState>(json);
-            return s ?? new BotState();
+            return File.Exists(path) 
+                ? JsonSerializer.Deserialize<BotState>(File.ReadAllText(path, Encoding.UTF8)) ?? new()
+                : new();
         }
-        catch
-        {
-            return new BotState();
-        }
+        catch { return new(); }
     }
 
     private static void SaveState(string path, BotState state)
@@ -695,26 +522,19 @@ public class ReadJsonConfig(
             var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(path, json, Encoding.UTF8);
         }
-        catch
-        {
-            // ignore
-        }
+        catch { }
     }
 }
 
 public record ModConfig
 {
-    public bool Enabled { get; set; }
-
     public DiscordConfig Discord { get; set; } = new();
     public FikaConfig Fika { get; set; } = new();
     public UpdateConfig Update { get; set; } = new();
     public LogMonitorConfig LogMonitor { get; set; } = new();
-
     public TextConfig Text { get; set; } = new();
     public ColorConfig Colors { get; set; } = new();
     public IconConfig Icons { get; set; } = new();
-
     public Dictionary<string, string> MapEmoji { get; set; } = new();
     public Dictionary<string, string> LocationNames { get; set; } = new();
     public Dictionary<string, string> ActivityNames { get; set; } = new();
@@ -728,30 +548,17 @@ public record DiscordConfig
     public string WebhookUrl { get; set; } = "";
     public string Username { get; set; } = "Fika Status";
     public string AvatarUrl { get; set; } = "";
-    public bool Tts { get; set; }
     public long StatusMessageId { get; set; }
-    public string StateFile { get; set; } = "bot_state.json";
 }
 
 public record FikaConfig
 {
     public string BaseUrl { get; set; } = "https://127.0.0.1:6969";
     public string ApiKey { get; set; } = "";
-    public bool IgnoreSslErrors { get; set; } = true;
-    public int TimeoutSeconds { get; set; } = 10;
 }
 
-public record UpdateConfig
-{
-    public int IntervalSeconds { get; set; } = 30;
-}
-
-public record LogMonitorConfig
-{
-    public bool Enabled { get; set; }
-    public string LogFolderPath { get; set; } = "";
-    public int TimezoneOffsetHours { get; set; } = 1;
-}
+public record UpdateConfig { public int IntervalSeconds { get; set; } = 30; }
+public record LogMonitorConfig { public bool Enabled { get; set; }  public int TimezoneOffsetHours { get; set; } }
 
 public record TextConfig
 {
@@ -765,35 +572,15 @@ public record TextConfig
     public string FooterPrefix { get; set; } = "Last updated:";
 }
 
-public record ColorConfig
-{
-    public int EmbedColorDecimal { get; set; } = 3447003;
-}
+public record ColorConfig { public int EmbedColorDecimal { get; set; } = 3447003; }
+public record IconConfig { public string DefaultMap { get; set; } = "🗺️"; }
 
-public record IconConfig
-{
-    public string InRaid { get; set; } = "⚔️";
-    public string OutOfRaid { get; set; } = "🧩";
-    public string DefaultMap { get; set; } = "🗺️";
-}
-
-// --- Fika response models ---
-public class PlayersResponse
-{
-    [JsonPropertyName("players")]
-    public List<PlayerEntry>? Players { get; set; }
-}
-
+public class PlayersResponse { [JsonPropertyName("players")] public List<PlayerEntry>? Players { get; set; } }
 public class PlayerEntry
 {
-    [JsonPropertyName("profileId")]
-    public string? ProfileId { get; set; }
-
-    [JsonPropertyName("nickname")]
-    public string? Nickname { get; set; }
-
-    [JsonPropertyName("location")]
-    public int Location { get; set; }
+    [JsonPropertyName("profileId")] public string? ProfileId { get; set; }
+    [JsonPropertyName("nickname")] public string? Nickname { get; set; }
+    [JsonPropertyName("location")] public int Location { get; set; }
 }
 
 public class OnlinePlayer
@@ -812,76 +599,36 @@ public class PresenceEntry
     public int? Side { get; set; }
 }
 
-// --- Webhook payload models ---
 public class WebhookSendPayload
 {
-    [JsonPropertyName("content")]
-    public string? Content { get; set; }
-
-    [JsonPropertyName("username")]
-    public string? Username { get; set; }
-
-    [JsonPropertyName("avatar_url")]
-    public string? AvatarUrl { get; set; }
-
-    [JsonPropertyName("tts")]
-    public bool Tts { get; set; }
-
-    [JsonPropertyName("embeds")]
-    public List<EmbedPayload>? Embeds { get; set; }
+    [JsonPropertyName("content")] public string? Content { get; set; }
+    [JsonPropertyName("username")] public string? Username { get; set; }
+    [JsonPropertyName("avatar_url")] public string? AvatarUrl { get; set; }
+    [JsonPropertyName("tts")] public bool Tts { get; set; }
+    [JsonPropertyName("embeds")] public List<EmbedPayload>? Embeds { get; set; }
 }
 
-public class WebhookMessage
-{
-    [JsonPropertyName("id")]
-    public string Id { get; set; } = "0";
-}
+public class WebhookMessage { [JsonPropertyName("id")] public string Id { get; set; } = "0"; }
 
 public class EmbedPayload
 {
-    [JsonPropertyName("title")]
-    public string? Title { get; set; }
-
-    [JsonPropertyName("description")]
-    public string? Description { get; set; }
-
-    [JsonPropertyName("color")]
-    public int Color { get; set; }
-
-    [JsonPropertyName("fields")]
-    public List<EmbedFieldPayload>? Fields { get; set; }
-
-    [JsonPropertyName("footer")]
-    public EmbedFooterPayload? Footer { get; set; }
+    [JsonPropertyName("title")] public string? Title { get; set; }
+    [JsonPropertyName("description")] public string? Description { get; set; }
+    [JsonPropertyName("color")] public int Color { get; set; }
+    [JsonPropertyName("fields")] public List<EmbedFieldPayload>? Fields { get; set; }
+    [JsonPropertyName("footer")] public EmbedFooterPayload? Footer { get; set; }
 }
 
 public class EmbedFieldPayload
 {
-    [JsonPropertyName("name")]
-    public string Name { get; set; } = "";
-
-    [JsonPropertyName("value")]
-    public string Value { get; set; } = "";
-
-    [JsonPropertyName("inline")]
-    public bool Inline { get; set; }
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("value")] public string Value { get; set; } = "";
+    [JsonPropertyName("inline")] public bool Inline { get; set; }
 }
 
-public class EmbedFooterPayload
-{
-    [JsonPropertyName("text")]
-    public string Text { get; set; } = "";
-}
+public class EmbedFooterPayload { [JsonPropertyName("text")] public string Text { get; set; } = ""; }
+public class BotState { [JsonPropertyName("status_message_id")] public ulong StatusMessageId { get; set; } }
 
-// --- State file model ---
-public class BotState
-{
-    [JsonPropertyName("status_message_id")]
-    public ulong StatusMessageId { get; set; }
-}
-
-// --- Log monitor (weekly boss) ---
-// FIX 11: Make LogMonitorLite implement IDisposable
 public class LogMonitorLite : IDisposable
 {
     private readonly string _logFolderPath;
@@ -893,18 +640,17 @@ public class LogMonitorLite : IDisposable
     public string? WeeklyBoss { get; private set; }
     public string? WeeklyBossMap { get; private set; }
 
-    private static readonly Dictionary<string, string> BossToMapKey =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["bossBully"]    = "bigmap",
-            ["bossGluhar"]   = "rezervbase",
-            ["bossKilla"]    = "interchange",
-            ["bossKojaniy"]  = "woods",
-            ["bossSanitar"]  = "shoreline",
-            ["bossKolontay"] = "tarkovstreets",
-            ["bossKnight"]   = "lighthouse",
-            ["bossTagilla"]  = "factory4_day",
-        };
+    private static readonly Dictionary<string, string> BossToMapKey = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["bossBully"] = "bigmap",
+        ["bossGluhar"] = "rezervbase",
+        ["bossKilla"] = "interchange",
+        ["bossKojaniy"] = "woods",
+        ["bossSanitar"] = "shoreline",
+        ["bossKolontay"] = "tarkovstreets",
+        ["bossKnight"] = "lighthouse",
+        ["bossTagilla"] = "factory4_day",
+    };
 
     public LogMonitorLite(string logFolderPath, TimeSpan tzOffset)
     {
@@ -920,59 +666,33 @@ public class LogMonitorLite : IDisposable
 
         try
         {
-            using var fs = new FileStream(
-                _logFilePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
-
+            using var fs = new FileStream(_logFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var sr = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
 
             string? line;
             while ((line = sr.ReadLine()) != null)
-            {
                 ProcessLine(line, initialLoad: true);
-            }
 
             _pos = fs.Position;
         }
-        catch
-        {
-            _logFilePath = null;
-        }
+        catch { _logFilePath = null; }
     }
 
     private string? FindLatestLog()
     {
-        if (string.IsNullOrWhiteSpace(_logFolderPath)) return null;
-        if (!Directory.Exists(_logFolderPath)) return null;
+        if (string.IsNullOrWhiteSpace(_logFolderPath) || !Directory.Exists(_logFolderPath)) return null;
 
         var files = Directory.GetFiles(_logFolderPath, "spt*.log");
         if (files.Length == 0) return null;
 
-        string latest = files[0];
-        DateTime latestTime = File.GetLastWriteTimeUtc(latest);
-
-        foreach (var f in files)
-        {
-            var t = File.GetLastWriteTimeUtc(f);
-            if (t > latestTime)
-            {
-                latestTime = t;
-                latest = f;
-            }
-        }
-
-        return latest;
+        return files.OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
     }
 
     public void Poll()
     {
-        if (_disposed) return;
-
-        if (_logFilePath == null || !File.Exists(_logFilePath))
+        if (_disposed || _logFilePath == null || !File.Exists(_logFilePath))
         {
-            InitFile();
+            if (!_disposed) InitFile();
             return;
         }
 
@@ -980,73 +700,46 @@ public class LogMonitorLite : IDisposable
         {
             using var fs = new FileStream(_logFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             fs.Seek(_pos, SeekOrigin.Begin);
-
             using var sr = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
+            
             string? line;
             while ((line = sr.ReadLine()) != null)
-            {
                 if (!string.IsNullOrWhiteSpace(line))
                     ProcessLine(line, initialLoad: false);
-            }
 
             _pos = fs.Position;
         }
-        catch
-        {
-            // ignore
-        }
+        catch { }
     }
 
     private void ProcessLine(string line, bool initialLoad)
     {
         if (line.Contains("Weekly Boss:") && line.Contains("_botplacementsystem"))
         {
-            var m = Regex.Match(
-                line,
-                @"Weekly Boss:\s+(boss\w+)\s+\|\s+\d+%\s+Chance\s+on\s+(\w+)",
-                RegexOptions.CultureInvariant);
-
+            var m = Regex.Match(line, @"Weekly Boss:\s+(boss\w+)\s+\|\s+\d+%\s+Chance\s+on\s+(\w+)", RegexOptions.CultureInvariant);
             if (m.Success)
             {
                 WeeklyBoss = m.Groups[1].Value;
                 WeeklyBossMap = m.Groups[2].Value;
             }
-
             return;
         }
 
-        if (line.IndexOf(" is boss of the week", StringComparison.OrdinalIgnoreCase) < 0)
-            return;
+        if (!line.Contains(" is boss of the week", StringComparison.OrdinalIgnoreCase)) return;
 
-        var m2 = Regex.Match(
-            line,
-            @"\b(boss\w+)\b\s+is\s+boss\s+of\s+the\s+week\b",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-        if (!m2.Success)
-            return;
-
-        if (!string.IsNullOrWhiteSpace(WeeklyBoss) && !string.IsNullOrWhiteSpace(WeeklyBossMap))
-            return;
+        var m2 = Regex.Match(line, @"\b(boss\w+)\b\s+is\s+boss\s+of\s+the\s+week\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!m2.Success || (!string.IsNullOrWhiteSpace(WeeklyBoss) && !string.IsNullOrWhiteSpace(WeeklyBossMap))) return;
 
         WeeklyBoss = m2.Groups[1].Value;
-
-        if (BossToMapKey.TryGetValue(WeeklyBoss, out var mapKey))
-            WeeklyBossMap = mapKey;
-        else
-            WeeklyBossMap = null;
+        WeeklyBossMap = BossToMapKey.TryGetValue(WeeklyBoss, out var mapKey) ? mapKey : null;
     }
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        
-        // Clear references to help GC
         _logFilePath = null;
         WeeklyBoss = null;
         WeeklyBossMap = null;
     }
 }
-
-
