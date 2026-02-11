@@ -19,7 +19,7 @@ public record ModMetadata : AbstractModMetadata
     public override string Name { get; init; } = "Fika Discord Presence";
     public override string Author { get; init; } = "Fiodor";
     public override List<string>? Contributors { get; init; }
-    public override SemanticVersioning.Version Version { get; init; } = new("1.0.0");
+    public override SemanticVersioning.Version Version { get; init; } = new("1.0.2");
     public override SemanticVersioning.Range SptVersion { get; init; } = new("~4.0.0");
 
     public override List<string>? Incompatibilities { get; init; }
@@ -1048,3 +1048,4 @@ public class LogMonitorLite : IDisposable
         WeeklyBossMap = null;
     }
 }
+
