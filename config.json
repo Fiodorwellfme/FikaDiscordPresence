@@ -1,4 +1,5 @@
 {
+  // Comment to test
   // Master on/off switch for the mod.
   // true  = mod runs and posts/edits the Discord message
   // false = mod does nothing (but still loads)
@@ -53,12 +54,7 @@
     // Enables weekly boss parsing from SPT server logs.
     // true  = read log file and try to find "Weekly Boss" lines
     // false = skip log reading entirely
-    "Enabled": false,
-
-    // Folder where SPT logs live. Must be the DIRECTORY containing spt*.log files.
-    // JSON treats backslash \ as an escape character.
-    // Use double backslashes like: "X:\\Your\\Tarkov\\Folder\\SPT\\user\\logs\\spt"
-    "LogFolderPath": ""
+    "Enabled": true
   },
 
   "Text": {
@@ -78,7 +74,7 @@
 
     // Weekly boss label.
     // With your code change, this can show even if no one is online.
-    "BossTitle": "👑 Boss of the Week",
+    "BossTitle": "👑 Boss of the Week 👑",
 
     // Footer prefix (timestamp is added by the mod).
     "FooterPrefix": "Last updated:"
