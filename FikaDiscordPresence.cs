@@ -19,7 +19,7 @@ public record ModMetadata : IModMetadata
     public string Name { get; init; } = "Fika Discord Presence";
     public string Author { get; init; } = "Fiodor";
     public List<string>? Contributors { get; init; }
-    public SemanticVersioning.Version Version { get; init; } = new("2.0.0");
+    public SemanticVersioning.Version Version { get; init; } = new("2.1.0");
     public SemanticVersioning.Range SptVersion { get; init; } = new("~4.1.0");
     public bool HasPrepatcher { get; init; } = false;
     public List<string>? Incompatibilities { get; init; }
@@ -493,7 +493,7 @@ public class ReadJsonConfig(ISptLogger<ReadJsonConfig> logger, ModHelper modHelp
         {
             Content = null,
             Username = config.Discord.Username,
-            AvatarUrl = config.Discord.AvatarUrl,
+            AvatarUrl = string.IsNullOrWhiteSpace(config.Discord.AvatarUrl) ? null : config.Discord.AvatarUrl.Trim(),
             Tts = DiscordTts,
             Embeds = [embed]
         };
@@ -512,13 +512,9 @@ public class ReadJsonConfig(ISptLogger<ReadJsonConfig> logger, ModHelper modHelp
     {
         var patchUrl = $"{(config.Discord.WebhookUrl ?? "").Trim().TrimEnd('/')}/messages/{messageId}";
 
-        var payload = new WebhookSendPayload
+        var payload = new
         {
-            Content = null,
-            Username = config.Discord.Username,
-            AvatarUrl = config.Discord.AvatarUrl,
-            Tts = DiscordTts,
-            Embeds = [embed]
+            embeds = new[] { embed }
         };
 
         var body = JsonSerializer.Serialize(payload, _jsonOpts);
@@ -632,7 +628,9 @@ public class WebhookSendPayload
 {
     [JsonPropertyName("content")] public string? Content { get; set; }
     [JsonPropertyName("username")] public string? Username { get; set; }
-    [JsonPropertyName("avatar_url")] public string? AvatarUrl { get; set; }
+    [JsonPropertyName("avatar_url")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AvatarUrl { get; set; }
     [JsonPropertyName("tts")] public bool Tts { get; set; }
     [JsonPropertyName("embeds")] public List<EmbedPayload>? Embeds { get; set; }
 }
